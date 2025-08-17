@@ -20,7 +20,7 @@ from app.exceptions.custom_exception import (
 )
 from uuid import UUID
 
-router = APIRouter(prefix="/session-analysis", tags=["session-analysis"])
+router = APIRouter(prefix="/session-analysis", tags=["Session Analysis"])
 
 
 @router.post("/", response_model=SessionAnalysisResponse)
