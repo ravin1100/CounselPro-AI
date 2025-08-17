@@ -105,9 +105,7 @@ class VideoProcessor:
             bool: True if a face is detected (camera is on), False otherwise.
         """
         # Load the pre-trained Haar Cascade for face detection
-        face_cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        )
+        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")  # type: ignore
 
         if face_cascade.empty():
             print("Error loading face cascade XML file.")
@@ -234,7 +232,7 @@ class VideoProcessor:
             self.download_video_by_id(service, file_id, video_path)
             print("Successfully downloaded private video using authenticated API")
 
-            # # Perform the analysis
+            # Perform the analysis
             # cap = cv2.VideoCapture(video_path)
             # if not cap.isOpened():
             #     raise Exception("Failed to open video file for analysis")
@@ -261,17 +259,17 @@ class VideoProcessor:
             # duration = frame_count / fps if fps > 0 else 0
             # cap.release()
 
-            # Extract audio for Whisper processing
+            # Extract audio and transcribe it
             print("Extracting audio from video...")
             audio_path = self.extract_audio(video_path, temp_dir)
 
             # Construct the response
             results = {
-                #     "camera_status": "On" if camera_on else "Off",
-                #     "attire_status": attire_status,
-                #     "video_duration": round(duration, 2),
-                #     "frame_count": frame_count,
-                #     "fps": round(fps, 2),
+                # "camera_status": "On" if camera_on else "Off",
+                # "attire_status": attire_status,
+                # "video_duration": round(duration, 2),
+                # "frame_count": frame_count,
+                # "fps": round(fps, 2),
                 "audio_path": audio_path,
             }
 

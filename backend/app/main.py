@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.db.database import create_tables
 from app.routes.counselor_route import router as counselor_router
 from app.routes.session_route import router as session_router
+from app.routes.catalog_route import router as catalog_router
 from app.routes.session_analysis_route import router as session_analysis_router
 from app.routes.raw_transcript_route import router as raw_transcript_router
 from contextlib import asynccontextmanager
@@ -81,6 +82,7 @@ async def log_requests(request: Request, call_next):
 
 app.include_router(counselor_router)
 app.include_router(session_router)
+app.include_router(catalog_router)
 app.include_router(session_analysis_router)
 app.include_router(raw_transcript_router)
 

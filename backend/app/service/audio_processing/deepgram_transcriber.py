@@ -44,6 +44,84 @@ class DeepgramTranscriber:
         seconds = seconds % 60
         return f"{hours:02d}:{minutes:02d}:{seconds:05.2f}"
 
+    def _identify_roles(self, utterances: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Identify speaker roles based on speaking patterns and context.
+        """
+        if not utterances:
+            return {}
+
+        # Count words per speaker
+        speaker_stats = {}
+        for utt in utterances:
+            spk = utt["speaker"]
+            words = len(utt["text"].split())
+            speaker_stats[spk] = speaker_stats.get(spk, 0) + words
+
+        # Get all unique speakers
+        all_speakers = list(speaker_stats.keys())
+
+        if len(all_speakers) == 1:
+            # Only one speaker
+            return {"counselor": all_speakers[0]}
+        elif len(all_speakers) == 2:
+            # Two speakers - identify counselor and student
+            first_speaker = utterances[0]["speaker"]
+
+            # Guess by talk ratio (counselor typically talks more)
+            counselor = max(speaker_stats, key=lambda x: speaker_stats[x])
+            student = min(speaker_stats, key=lambda x: speaker_stats[x])
+
+            # If first speaker talked a lot, reinforce guess
+            if first_speaker != counselor:
+                # Flip if mismatch and ratio is not huge
+                if speaker_stats[counselor] / speaker_stats[student] < 1.3:
+                    counselor, student = student, counselor
+
+            return {"counselor": counselor, "student": student}
+        else:
+            # More than 2 speakers - identify counselor and label others
+            counselor = max(speaker_stats, key=lambda x: speaker_stats[x])
+            role_mapping = {"counselor": counselor}
+
+            # Label other speakers as speaker_2, speaker_3, etc.
+            speaker_counter = 2
+            for speaker_id in all_speakers:
+                if speaker_id != counselor:
+                    role_mapping[f"speaker_{speaker_counter}"] = speaker_id
+                    speaker_counter += 1
+
+            return role_mapping
+
+    def _apply_role_labels(
+        self, utterances: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Apply role labels to utterances based on speaker identification.
+
+        Args:
+            utterances: List of utterance dictionaries
+
+        Returns:
+            List of utterances with role labels added
+        """
+        role_mapping = self._identify_roles(utterances)
+
+        # Create reverse mapping (speaker_id -> role)
+        speaker_to_role = {v: k for k, v in role_mapping.items()}
+
+        # Add role labels to utterances
+        labeled_utterances = []
+        for utt in utterances:
+            labeled_utt = utt.copy()
+            speaker_id = utt["speaker"]
+            labeled_utt["role"] = speaker_to_role.get(
+                speaker_id, f"speaker_{speaker_id}"
+            )
+            labeled_utterances.append(labeled_utt)
+
+        return labeled_utterances
+
     def _extract_utterances(self, response: Dict[str, Any]) -> List[Dict[str, Any]]:
         utterances = []
         dg_utterances = response.get("results", {}).get("utterances", [])
@@ -59,21 +137,22 @@ class DeepgramTranscriber:
                 }
             )
 
-        return utterances
+        # Apply role labels to the utterances
+        labeled_utterances = self._apply_role_labels(utterances)
 
-    async def transcribe_chunk(
-        self, chunk_path: str, chunk_index: int
-    ) -> Dict[str, Any]:
+        return labeled_utterances
+
+    def transcribe_chunk(self, chunk_path: str, chunk_name: str) -> str:
         chunk_file = Path(chunk_path)
+        output_path = self.output_dir / f"chunk_{chunk_name}.json"
 
-        logger.info(f"Transcribing chunk {chunk_index:03d}: {chunk_file.name}")
+        logger.info(f"Transcribing chunk {chunk_name}: {chunk_file.name}")
 
         options = PrerecordedOptions(
-            model="nova-2",
+            model="nova-3",
             language="en-US",
             punctuate=True,
             diarize=True,
-            smart_format=True,
             utterances=True,
             utt_split=0.8,
         )
@@ -87,142 +166,52 @@ class DeepgramTranscriber:
 
         utterances = self._extract_utterances(response.to_dict())  # type: ignore
 
+        # Get role mapping for metadata
+        role_mapping = self._identify_roles(utterances)
+
         formatted_output = {
             "metadata": {
-                "chunk_index": chunk_index,
-                "chunk_file": f"{chunk_file.name}",
+                "chunk_name": chunk_name,
                 "processing_time_seconds": round(processing_time, 2),
-                "deepgram_model": "nova-2",
                 "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "api_version": "v1",
+                "role_mapping": role_mapping,
+                "total_speakers": len(role_mapping),
             },
             "utterances": utterances,
         }
 
-        logger.info(f"Completed chunk {chunk_index:03d} - {len(utterances)} utterances")
-        return formatted_output
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(formatted_output, f, indent=2, ensure_ascii=False)
 
-    async def transcribe_chunks(self, chunk_paths: List[str]) -> Dict[str, Any]:
-        logger.info(f"Starting transcription of {len(chunk_paths)} chunks")
+        return str(output_path)
 
-        all_transcripts = []
-        for i, chunk_path in enumerate(chunk_paths, 1):
-            transcript_data = await self.transcribe_chunk(chunk_path, i)
-            all_transcripts.append(transcript_data)
+    # def transcribe_chunks(self, chunk_paths: List[str]) -> List[str]:
+    #     logger.info(f"Starting transcription of {len(chunk_paths)} chunks")
 
-        combined_transcript = {
-            "metadata": {
-                "total_chunks": len(chunk_paths),
-                "total_utterances": sum(len(t["utterances"]) for t in all_transcripts),
-                "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"),
-            },
-            "chunks": all_transcripts,
-        }
+    #     transcript_paths = []
+    #     for i, chunk_path in enumerate(chunk_paths, 1):
+    #         transcript_path = self.transcribe_chunk(chunk_path, i)
+    #         transcript_paths.append(transcript_path)
 
-        return combined_transcript
-
-    async def transcribe_and_store(
-        self, chunk_paths: List[str], session_uid: UUID
-    ) -> Dict[str, Any]:
-        """Transcribe audio chunks and store the results directly in the database"""
-        if not self.db_session:
-            raise ValueError("Database session is required for storing transcripts")
-
-        # Check if session exists
-        stmt = select(CounselingSession).where(CounselingSession.uid == session_uid)
-        result = await self.db_session.execute(stmt)
-        session = result.scalar_one_or_none()
-
-        if not session:
-            raise NotFoundException(
-                details=f"Counseling session {session_uid} not found"
-            )
-
-        # Check if transcript already exists for this session
-        stmt = select(RawTranscript).where(RawTranscript.session_id == session.id)
-        result = await self.db_session.execute(stmt)
-        existing_transcript = result.scalar_one_or_none()
-
-        if existing_transcript:
-            raise BadRequestException(
-                details=f"Transcript already exists for session {session_uid}"
-            )
-
-        # Transcribe all chunks
-        transcript_data = await self.transcribe_chunks(chunk_paths)
-
-        # Create transcript data for database
-        transcript_create = RawTranscriptCreate(
-            session_uid=session_uid,
-            total_segments=transcript_data["metadata"]["total_utterances"],
-            raw_transcript=transcript_data,
-        )
-
-        # Store in database
-        transcript = await create_raw_transcript(self.db_session, transcript_create)
-
-        return {
-            "uid": transcript.uid,
-            "session_uid": session_uid,
-            "total_segments": transcript.total_segments,
-            "message": "Transcript successfully created and stored in database",
-        }
+    #     return transcript_paths
 
 
-async def transcribe_session_audio(
-    db: AsyncSession, session_uid: UUID, audio_file_paths: List[str]
-) -> Dict[str, Any]:
-    """
-    Main function to transcribe audio files for a specific session and store in database
+# def main():
+#     try:
+#         chunk_paths = sys.argv[1:]
+#         if not chunk_paths:
+#             logger.error("No audio files provided")
+#             sys.exit(1)
 
-    Args:
-        db: Database session
-        session_uid: UUID of the counseling session
-        audio_file_paths: List of paths to audio files to transcribe
+#         transcriber = DeepgramTranscriber()
+#         transcript_paths = transcriber.transcribe_chunks(chunk_paths)
 
-    Returns:
-        Dictionary with transcript details and status message
-    """
-    try:
-        if not audio_file_paths:
-            raise ValueError("No audio files provided")
+#         logger.info(f"Completed transcription of {len(transcript_paths)} files")
+#         return transcript_paths
 
-        transcriber = DeepgramTranscriber(db_session=db)
-        result = await transcriber.transcribe_and_store(audio_file_paths, session_uid)
+#     except Exception as e:
+#         logger.error(f"Transcription failed: {e}")
+#         sys.exit(1)
 
-        logger.info(f"Completed transcription for session {session_uid}")
-        return result
-
-    except Exception as e:
-        logger.error(f"Transcription failed: {e}")
-        raise e
-
-
-# This is kept for backwards compatibility but now requires async execution
-async def main():
-    try:
-        if len(sys.argv) < 3:
-            logger.error(
-                "Usage: python deepgram_transcriber.py <session_uid> <audio_file1> [audio_file2 ...]"
-            )
-            sys.exit(1)
-
-        session_uid_str = sys.argv[1]
-        chunk_paths = sys.argv[2:]
-
-        # This would normally be done by FastAPI's dependency injection
-        # Just a placeholder to show how it would work in command-line context
-        logger.error(
-            "This script can no longer be run directly - use the API endpoints instead"
-        )
-        sys.exit(1)
-
-    except Exception as e:
-        logger.error(f"Transcription failed: {e}")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
-    import asyncio
-
-    asyncio.run(main())
+# if __name__ == "__main__":
+#     main()
