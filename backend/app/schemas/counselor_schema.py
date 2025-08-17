@@ -31,3 +31,14 @@ class CounselorResponse(BaseModel):
     mobile_number: str
 
     model_config = {"from_attributes": True}
+
+
+# Paginated list response for counselors
+from typing import List
+
+
+class CounselorListResponse(BaseModel):
+    items: List[CounselorResponse]
+    total: int
+    skip: int
+    limit: int

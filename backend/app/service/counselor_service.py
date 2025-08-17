@@ -96,10 +96,15 @@ async def delete_counselor(db: AsyncSession, counselor_uid: UUID) -> dict:
 
 async def get_all_counselors(db: AsyncSession, skip: int = 0, limit: int = 10):
     try:
+        # Get total count
+        total_result = await db.execute(select(Counselor))
+        total = len(total_result.scalars().all())
+
+        # Get paginated items
         query = select(Counselor).offset(skip).limit(limit)
         result = await db.execute(query)
         counselors = result.scalars().all()
-        return counselors
+        return counselors, total
     except SQLAlchemyError as e:
         logger.error(f"Error fetching all counselors: {e}")
         raise BaseAppException(

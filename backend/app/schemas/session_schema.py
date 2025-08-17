@@ -32,11 +32,24 @@ class CounselorInfo(BaseModel):
 
 
 # Response schema
+
+
 class SessionResponse(BaseModel):
     uid: UUID
     description: str
     session_date: datetime
     recording_link: HttpUrl
-    counselor: CounselorInfo  # 👈 nested counselor info
+    counselor: CounselorInfo  # nested counselor info
+
+
+# Paginated list response for sessions
+from typing import List
+
+
+class SessionListResponse(BaseModel):
+    items: List[SessionResponse]
+    total: int
+    skip: int
+    limit: int
 
     model_config = {"from_attributes": True}

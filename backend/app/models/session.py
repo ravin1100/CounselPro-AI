@@ -20,3 +20,6 @@ class CounselingSession(Base):
 
     counselor = relationship("Counselor", back_populates="sessions")
     analysis = relationship("SessionAnalysis", back_populates="session", uselist=False)
+    raw_transcript = relationship(
+        "RawTranscript", back_populates="session", uselist=False
+    )

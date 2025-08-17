@@ -150,7 +150,11 @@ async def get_sessions_by_counselor(
 
 async def get_all_sessions(db: AsyncSession, skip: int = 0, limit: int = 10):
     try:
-        # Fetch all sessions with their counselors
+        # Get total count
+        total_result = await db.execute(select(CounselingSession))
+        total = len(total_result.scalars().all())
+
+        # Fetch paginated sessions with their counselors
         result = await db.execute(
             select(CounselingSession)
             .options(joinedload(CounselingSession.counselor))
@@ -160,7 +164,7 @@ async def get_all_sessions(db: AsyncSession, skip: int = 0, limit: int = 10):
         sessions = result.scalars().all()
 
         # Format the response
-        return [
+        items = [
             SessionResponse(
                 uid=session.uid,
                 description=session.description,
@@ -173,6 +177,7 @@ async def get_all_sessions(db: AsyncSession, skip: int = 0, limit: int = 10):
             )
             for session in sessions
         ]
+        return items, total
 
     except SQLAlchemyError as e:
         logger.error(f"Database error fetching all sessions: {e}")
