@@ -19,6 +19,4 @@ class CounselingSession(Base):
     recording_link = Column(String, nullable=False)
 
     counselor = relationship("Counselor", back_populates="sessions")
-    raw_transcript = relationship(
-        "RawTranscript", back_populates="session", uselist=False
-    )
+    analysis = relationship("SessionAnalysis", back_populates="session", uselist=False)

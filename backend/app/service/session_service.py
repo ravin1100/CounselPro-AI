@@ -1,6 +1,7 @@
 import logging
 from uuid import UUID
 from app.service.video_processing.video_processing import VideoProcessor
+
 # from service.video_processing.video_processing import VideoProcessor
 from app.service.audio_processing.deepgram_transcriber import DeepgramTranscriber
 from app.service.course_verification.course_verifier import CourseVerifier
@@ -97,6 +98,7 @@ async def get_session_by_id(db: AsyncSession, session_uid: UUID) -> SessionRespo
             details=str(e),
             status_code=500,
         )
+
 
 async def get_sessions_by_counselor(
     db: AsyncSession, counselor_uid: str, skip: int = 0, limit: int = 10
@@ -261,15 +263,16 @@ async def process_video_background(session_uid: UUID, video_url: str):
             try:
                 print(f"Starting Deepgram transcription for audio: {audio_path}")
                 transcriber = DeepgramTranscriber()
-                transcript_path = transcriber.transcribe_chunk(audio_path, str(session_uid))
+                transcript_path = transcriber.transcribe_chunk(
+                    audio_path, str(session_uid)
+                )
                 print(f"Transcription completed: {transcript_path}")
                 # Add transcript path to results
                 results["transcript_path"] = transcript_path
             except Exception as transcription_error:
                 print(f"Warning: Transcription failed: {transcription_error}")
                 results["transcription_error"] = str(transcription_error)
-            
-        
+
         print(f"Video processing completed for session {session_uid}")
         print(f"Results: {results}")
 
@@ -277,39 +280,45 @@ async def process_video_background(session_uid: UUID, video_url: str):
         if results.get("transcript_path"):
             try:
                 print(f"Starting course verification for session {session_uid}")
-                
+
                 # Load transcript data
                 import json
-                with open(results["transcript_path"], 'r', encoding='utf-8') as f:
+
+                with open(results["transcript_path"], "r", encoding="utf-8") as f:
                     transcript_data = json.load(f)
-                
+
                 # Initialize course verifier
                 verifier = CourseVerifier()
-                
+
                 # Verify course information
                 verification_result = verifier.verify_full_transcript(transcript_data)
-                
+
                 # Save verification results
                 from pathlib import Path
+
                 verification_dir = Path("assets/verification_results")
                 verification_dir.mkdir(parents=True, exist_ok=True)
-                
-                verification_file = verification_dir / f"verification_{session_uid}.json"
-                with open(verification_file, 'w', encoding='utf-8') as f:
+
+                verification_file = (
+                    verification_dir / f"verification_{session_uid}.json"
+                )
+                with open(verification_file, "w", encoding="utf-8") as f:
                     json.dump(verification_result, f, indent=2, ensure_ascii=False)
-                
+
                 results["verification_path"] = str(verification_file)
                 results["accuracy_score"] = str(verification_result["accuracy_score"])
                 results["red_flags_count"] = str(len(verification_result["red_flags"]))
-                
+
                 print(f"Course verification completed: {verification_file}")
                 print(f"Accuracy score: {verification_result['accuracy_score']:.2f}")
-                
+
                 if verification_result["red_flags"]:
-                    print(f"⚠️  {len(verification_result['red_flags'])} red flags detected:")
+                    print(
+                        f"⚠️  {len(verification_result['red_flags'])} red flags detected:"
+                    )
                     for flag in verification_result["red_flags"]:
                         print(f"   • {flag}")
-                
+
             except Exception as verification_error:
                 print(f"Warning: Course verification failed: {verification_error}")
                 results["verification_error"] = str(verification_error)

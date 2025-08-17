@@ -5,7 +5,7 @@ from pydantic import BaseModel, HttpUrl, Field
 
 # Base schema (shared fields)
 class SessionBase(BaseModel):
-    counselor_uid: UUID  # Changed from str to UUID for input validation
+    counselor_uid: str
     description: str
     session_date: datetime
     recording_link: HttpUrl
@@ -18,14 +18,14 @@ class SessionCreate(SessionBase):
 
 # Update schema
 class SessionUpdate(BaseModel):
-    counselor_uid: UUID | None = None
+    counselor_uid: str | None = None
     session_date: datetime | None = None
     recording_link: HttpUrl | None = None
 
 
 # Counselor sub-schema (for response only)
 class CounselorInfo(BaseModel):
-    uid: UUID  # Changed from str to UUID
+    uid: str
     name: str
 
     model_config = {"from_attributes": True}
