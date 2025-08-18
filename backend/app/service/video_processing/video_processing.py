@@ -8,9 +8,15 @@ import google.generativeai as genai
 from datetime import datetime
 from skimage.metrics import structural_similarity as ssim
 import logging
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+
 
 # Configuration constants
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")  # Using Gemini 2.0 Flash experimental
