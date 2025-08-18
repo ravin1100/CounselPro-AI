@@ -25,7 +25,7 @@ class SessionUpdate(BaseModel):
 
 # Counselor sub-schema (for response only)
 class CounselorInfo(BaseModel):
-    uid: str
+    uid: UUID
     name: str
 
     model_config = {"from_attributes": True}
