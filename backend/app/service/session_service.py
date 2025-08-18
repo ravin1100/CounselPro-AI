@@ -58,7 +58,7 @@ async def create_session(
             description=new_session.description,
             session_date=new_session.session_date,
             recording_link=new_session.recording_link,
-            counselor=CounselorInfo(uid=counselor.uid, name=counselor.name),
+            counselor=CounselorInfo(uid=str(counselor.uid), name=counselor.name),
         )
 
     except SQLAlchemyError as e:
@@ -217,7 +217,7 @@ async def update_session(
             session_date=session.session_date,
             recording_link=session.recording_link,
             counselor=CounselorInfo(
-                uid=session.counselor.uid,
+                uid=str(session.counselor.uid),
                 name=session.counselor.name,
             ),
         )
