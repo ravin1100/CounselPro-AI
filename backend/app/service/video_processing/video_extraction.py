@@ -63,10 +63,23 @@ class VideoExtractor:
             # Sort timestamps for better performance
             sorted_timestamps = sorted(timestamps)
             
-            # Memory optimization: Resize frames for analysis if they're too large
-            # Face detection doesn't need full 4K resolution
-            target_width = min(640, width)  # Limit to 640px width max
-            target_height = int(height * (target_width / width))
+            # Smart resolution optimization: Preserve face quality while managing memory
+            # Face recognition needs sufficient detail - minimum 960px width for accurate detection
+            if width <= 960:
+                # Small videos: Keep original resolution
+                target_width = width
+                target_height = height
+                logger.info(f"Video resolution {width}x{height} is already optimal for face detection")
+            elif width <= 1920:
+                # Medium videos: Conservative downscaling to maintain face quality
+                target_width = max(960, width // 2)  # At least 960px, or half original
+                target_height = int(height * (target_width / width))
+                logger.info(f"Moderate downscaling: {width}x{height} -> {target_width}x{target_height}")
+            else:
+                # Large videos: More aggressive but still face-preserving downscaling
+                target_width = 1280  # Good balance between quality and performance
+                target_height = int(height * (target_width / width))
+                logger.info(f"Performance downscaling: {width}x{height} -> {target_width}x{target_height}")
             
             # Calculate memory usage and determine batch size
             frame_size_mb = (target_width * target_height * 3) / (1024 * 1024)  # MB per frame
@@ -155,11 +168,21 @@ class VideoExtractor:
             # Use a sampling rate that captures frames near our target timestamps
             sample_rate = max(0.5, min(avg_interval / 2, 2.0))  # Sample every 0.5-2 seconds
             
-            # Memory optimization: Resize frames
-            target_width = min(640, width)
-            target_height = int(height * (target_width / width))
+            # Smart resolution optimization (same as main method)
+            if width <= 960:
+                target_width = width
+                target_height = height
+                logger.info(f"Interval method: keeping original resolution {width}x{height}")
+            elif width <= 1920:
+                target_width = max(960, width // 2)
+                target_height = int(height * (target_width / width))
+                logger.info(f"Interval method: moderate downscaling to {target_width}x{target_height}")
+            else:
+                target_width = 1280
+                target_height = int(height * (target_width / width))
+                logger.info(f"Interval method: performance downscaling to {target_width}x{target_height}")
             
-            logger.info(f"Using interval method with {sample_rate}s intervals, resizing to {target_width}x{target_height}")
+            logger.info(f"Using interval method with {sample_rate}s intervals")
             
             # Extract frames at regular intervals with resizing
             process = (
@@ -331,7 +354,7 @@ class VideoExtractor:
             logger.info(f"Video metadata: {duration:.1f}s, {fps:.1f} fps, {width}x{height}")
             
             # Smart sampling strategy
-            sampling_interval = int(os.getenv("FRAME_SAMPLING_INTERVAL", "60"))
+            sampling_interval = int(os.getenv("FRAME_SAMPLING_INTERVAL", "10"))
             
             if smart_sampling and duration > 60:
                 # Sample more densely at the beginning and end, sparse in middle
