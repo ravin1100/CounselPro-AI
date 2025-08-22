@@ -18,7 +18,7 @@ SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 
 class VideoExtractor:
     """
-    Optimized video extractor with parallel processing and smart sampling.
+    Highly optimized video extractor with single-pass frame extraction.
     """
     
     def __init__(self, max_workers=4):
@@ -51,85 +51,227 @@ class VideoExtractor:
             logger.error(f"Error setting up Google Drive service: {e}")
             raise Exception(f"Failed to authenticate with Google Drive: {str(e)}")
 
-    def _extract_single_frame(self, temp_video_path, timestamp, width, height):
-        """Extract a single frame at the given timestamp."""
+    def _extract_all_frames_single_pass(self, temp_video_path, timestamps, width, height):
+        """
+        Extract all frames in a single ffmpeg pass using select filter with memory optimization.
+        Processes frames in batches to avoid memory issues with large videos.
+        """
         try:
-            frame_data, _ = (
-                ffmpeg
-                .input(temp_video_path, ss=timestamp)
-                .output('pipe:', format='rawvideo', pix_fmt='bgr24', vframes=1, s=f'{width}x{height}')
-                .run(capture_stdout=True, quiet=True)
-            )
-
-            if frame_data:
-                frame_array = np.frombuffer(frame_data, np.uint8)
-                frame = frame_array.reshape((height, width, 3))
-                return timestamp, frame
-            else:
-                return timestamp, None
-
-        except Exception as e:
-            logger.warning(f"Failed to extract frame at {timestamp}s: {e}")
-            return timestamp, None
-
-    def _extract_frames_batch(self, temp_video_path, timestamps, width, height, batch_size=10):
-        """Extract multiple frames in a single ffmpeg call for efficiency."""
-        try:
-            # Create filter for multiple timestamps
-            filter_complex = []
-            outputs = []
-            
-            for i, timestamp in enumerate(timestamps):
-                filter_complex.append(f'[0:v]trim=start={timestamp}:duration=0.04,setpts=PTS-STARTPTS[v{i}]')
-                outputs.append(f'[v{i}]')
-            
-            if not filter_complex:
+            if not timestamps:
                 return {}
             
-            # Build ffmpeg command
-            input_stream = ffmpeg.input(temp_video_path)
+            # Sort timestamps for better performance
+            sorted_timestamps = sorted(timestamps)
             
-            # For small batches, use the single frame approach which is more reliable
-            if len(timestamps) <= 3:
-                frames = {}
-                for timestamp in timestamps:
+            # Memory optimization: Resize frames for analysis if they're too large
+            # Face detection doesn't need full 4K resolution
+            target_width = min(640, width)  # Limit to 640px width max
+            target_height = int(height * (target_width / width))
+            
+            # Calculate memory usage and determine batch size
+            frame_size_mb = (target_width * target_height * 3) / (1024 * 1024)  # MB per frame
+            max_memory_mb = 500  # Limit to 500MB for frame processing
+            batch_size = max(10, int(max_memory_mb / frame_size_mb))  # At least 10 frames per batch
+            
+            logger.info(f"Extracting {len(timestamps)} frames in batches of {batch_size} (resized to {target_width}x{target_height})")
+            
+            frames = {}
+            
+            # Process timestamps in batches to manage memory
+            for batch_start in range(0, len(sorted_timestamps), batch_size):
+                batch_end = min(batch_start + batch_size, len(sorted_timestamps))
+                batch_timestamps = sorted_timestamps[batch_start:batch_end]
+                
+                logger.info(f"Processing batch {batch_start//batch_size + 1}/{(len(sorted_timestamps) + batch_size - 1)//batch_size}")
+                
+                # Create select filter expression for this batch
+                select_expr = '+'.join([f'eq(t,{ts})' for ts in batch_timestamps])
+                
+                # Extract frames for this batch with resizing
+                process = (
+                    ffmpeg
+                    .input(temp_video_path)
+                    .filter('select', select_expr)
+                    .filter('scale', target_width, target_height)  # Resize frames
+                    .output('pipe:', format='rawvideo', pix_fmt='bgr24',
+                           **{'preset': 'ultrafast', 'threads': '0'})  # Performance optimizations
+                    .run_async(pipe_stdout=True, pipe_stderr=True, quiet=True)
+                )
+                
+                batch_frame_size = target_height * target_width * 3  # 3 bytes per pixel (BGR)
+                
+                # Read frames for this batch
+                for i, timestamp in enumerate(batch_timestamps):
                     try:
-                        frame_data, _ = (
-                            ffmpeg
-                            .input(temp_video_path, ss=timestamp)
-                            .output('pipe:', format='rawvideo', pix_fmt='bgr24', vframes=1, s=f'{width}x{height}')
-                            .run(capture_stdout=True, quiet=True)
-                        )
-                        if frame_data:
+                        # Read frame data
+                        frame_data = process.stdout.read(batch_frame_size)
+                        
+                        if len(frame_data) == batch_frame_size:
+                            # Convert to numpy array
                             frame_array = np.frombuffer(frame_data, np.uint8)
-                            frame = frame_array.reshape((height, width, 3))
+                            frame = frame_array.reshape((target_height, target_width, 3))
                             frames[timestamp] = frame
                         else:
+                            logger.warning(f"Incomplete frame data at timestamp {timestamp}")
                             frames[timestamp] = None
+                            
                     except Exception as e:
-                        logger.warning(f"Failed to extract frame at {timestamp}s: {e}")
+                        logger.warning(f"Error reading frame at {timestamp}s: {e}")
                         frames[timestamp] = None
-                return frames
-            else:
-                # For larger batches, fall back to individual extraction
-                frames = {}
-                for timestamp in timestamps:
-                    _, frame = self._extract_single_frame(temp_video_path, timestamp, width, height)
-                    frames[timestamp] = frame
-                return frames
                 
-        except Exception as e:
-            logger.warning(f"Batch extraction failed, falling back to individual: {e}")
-            # Fallback to individual extraction
-            frames = {}
-            for timestamp in timestamps:
-                _, frame = self._extract_single_frame(temp_video_path, timestamp, width, height)
-                frames[timestamp] = frame
+                # Wait for batch process to complete
+                try:
+                    process.wait(timeout=30)  # 30 second timeout per batch
+                except:
+                    logger.warning("Process timeout, terminating batch")
+                    process.terminate()
+            
+            successful_frames = len([f for f in frames.values() if f is not None])
+            logger.info(f"Single-pass extraction completed: {successful_frames}/{len(timestamps)} successful")
+            
             return frames
+            
+        except Exception as e:
+            logger.error(f"Single-pass extraction failed: {e}")
+            # Fallback to interval-based extraction
+            return self._extract_frames_interval_method(temp_video_path, timestamps, width, height)
+
+    def _extract_frames_interval_method(self, temp_video_path, timestamps, width, height):
+        """
+        Alternative method: extract frames at regular intervals and pick closest matches.
+        Memory optimized with frame resizing.
+        """
+        try:
+            if not timestamps:
+                return {}
+                
+            # Find min and max timestamps
+            min_ts, max_ts = min(timestamps), max(timestamps)
+            
+            # Calculate optimal sampling rate
+            total_duration = max_ts - min_ts
+            avg_interval = total_duration / len(timestamps) if len(timestamps) > 1 else 1
+            
+            # Use a sampling rate that captures frames near our target timestamps
+            sample_rate = max(0.5, min(avg_interval / 2, 2.0))  # Sample every 0.5-2 seconds
+            
+            # Memory optimization: Resize frames
+            target_width = min(640, width)
+            target_height = int(height * (target_width / width))
+            
+            logger.info(f"Using interval method with {sample_rate}s intervals, resizing to {target_width}x{target_height}")
+            
+            # Extract frames at regular intervals with resizing
+            process = (
+                ffmpeg
+                .input(temp_video_path, ss=min_ts)
+                .filter('fps', fps=f'1/{sample_rate}')
+                .filter('scale', target_width, target_height)
+                .output('pipe:', format='rawvideo', pix_fmt='bgr24', 
+                       t=total_duration, **{'preset': 'ultrafast', 'threads': '0'})
+                .run_async(pipe_stdout=True, pipe_stderr=True, quiet=True)
+            )
+            
+            frames = {}
+            frame_size = target_height * target_width * 3
+            current_time = min_ts
+            
+            # Read frames and match to closest timestamps
+            while True:
+                try:
+                    frame_data = process.stdout.read(frame_size)
+                    if len(frame_data) < frame_size:
+                        break
+                        
+                    # Find closest target timestamp
+                    closest_ts = min(timestamps, key=lambda x: abs(x - current_time))
+                    if abs(closest_ts - current_time) <= sample_rate and closest_ts not in frames:
+                        frame_array = np.frombuffer(frame_data, np.uint8)
+                        frame = frame_array.reshape((target_height, target_width, 3))
+                        frames[closest_ts] = frame
+                        
+                    current_time += sample_rate
+                    
+                except Exception as e:
+                    logger.warning(f"Error in interval extraction: {e}")
+                    break
+            
+            process.terminate()
+            return frames
+            
+        except Exception as e:
+            logger.error(f"Interval extraction failed: {e}")
+            return {}
+
+    def _extract_frames_optimized_seeking(self, temp_video_path, timestamps, width, height):
+        """
+        Optimized seeking method - extract frames in timestamp order to minimize seeking.
+        """
+        try:
+            frames = {}
+            sorted_timestamps = sorted(timestamps)
+            
+            # Group nearby timestamps to minimize seeking
+            timestamp_groups = []
+            current_group = [sorted_timestamps[0]]
+            
+            for ts in sorted_timestamps[1:]:
+                if ts - current_group[-1] <= 5:  # Group timestamps within 5 seconds
+                    current_group.append(ts)
+                else:
+                    timestamp_groups.append(current_group)
+                    current_group = [ts]
+            timestamp_groups.append(current_group)
+            
+            logger.info(f"Processing {len(timestamp_groups)} timestamp groups")
+            
+            for group in timestamp_groups:
+                try:
+                    start_ts = group[0]
+                    duration = group[-1] - group[0] + 1  # Add buffer
+                    
+                    # Extract segment
+                    process = (
+                        ffmpeg
+                        .input(temp_video_path, ss=start_ts, t=duration)
+                        .output('pipe:', format='rawvideo', pix_fmt='bgr24', s=f'{width}x{height}')
+                        .run_async(pipe_stdout=True, pipe_stderr=True, quiet=True)
+                    )
+                    
+                    # Read frames and match to timestamps
+                    frame_size = height * width * 3
+                    frame_count = 0
+                    
+                    while frame_count < len(group):
+                        frame_data = process.stdout.read(frame_size)
+                        if len(frame_data) < frame_size:
+                            break
+                            
+                        current_ts = start_ts + (frame_count * duration / len(group))
+                        closest_target = min(group, key=lambda x: abs(x - current_ts))
+                        
+                        if abs(closest_target - current_ts) <= duration / len(group):
+                            frame_array = np.frombuffer(frame_data, np.uint8)
+                            frame = frame_array.reshape((height, width, 3))
+                            frames[closest_target] = frame
+                            
+                        frame_count += 1
+                    
+                    process.terminate()
+                    
+                except Exception as e:
+                    logger.warning(f"Error processing timestamp group: {e}")
+                    continue
+            
+            return frames
+            
+        except Exception as e:
+            logger.error(f"Optimized seeking failed: {e}")
+            return {}
 
     def get_video_frames_and_audio_paths(self, video_url: str, smart_sampling=True):
         """
-        Optimized processing method with parallel extraction and smart sampling.
+        Optimized processing method with single-pass frame extraction.
         """
         try:
             if not self.service:
@@ -147,7 +289,7 @@ class VideoExtractor:
 
             logger.info(f"Starting optimized video processing for file ID: {file_id}")
             
-            # Download video with progress tracking
+            # Download video
             temp_video = os.path.join(self.temp_dir, 'temp_video.mp4')
             
             request = self.service.files().get_media(fileId=file_id, acknowledgeAbuse=True)
@@ -162,7 +304,7 @@ class VideoExtractor:
                     if progress % 20 == 0:
                         logger.info(f"Download progress: {progress}%")
 
-            # Write to file more efficiently
+            # Write to file
             file_content.seek(0)
             with open(temp_video, 'wb') as f:
                 f.write(file_content.getvalue())
@@ -189,9 +331,9 @@ class VideoExtractor:
             logger.info(f"Video metadata: {duration:.1f}s, {fps:.1f} fps, {width}x{height}")
             
             # Smart sampling strategy
-            sampling_interval = int(os.getenv("FRAME_SAMPLING_INTERVAL", "5"))
+            sampling_interval = int(os.getenv("FRAME_SAMPLING_INTERVAL", "60"))
             
-            if smart_sampling and duration > 60:  # For videos longer than 1 minute
+            if smart_sampling and duration > 60:
                 # Sample more densely at the beginning and end, sparse in middle
                 start_samples = list(range(0, min(30, int(duration//3)), 2))
                 middle_samples = list(range(30, int(duration*2//3), sampling_interval*2))
@@ -204,50 +346,21 @@ class VideoExtractor:
             # Remove duplicates and sort
             timestamps = sorted(list(set(timestamps)))
             
-            logger.info(f"Using smart sampling: {len(timestamps)} frames to extract")
+            logger.info(f"Extracting {len(timestamps)} frames using single-pass method")
             
-            # Parallel frame extraction
-            frames = {}
-            if timestamps:
-                logger.info("Starting parallel frame extraction")
-                
-                # Split timestamps into batches for processing
-                batch_size = max(1, len(timestamps) // self.max_workers)
-                timestamp_batches = [timestamps[i:i + batch_size] for i in range(0, len(timestamps), batch_size)]
-                
-                with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                    # Submit batch jobs
-                    future_to_batch = {
-                        executor.submit(self._extract_frames_batch, temp_video, batch, width, height): batch
-                        for batch in timestamp_batches
-                    }
-                    
-                    completed_frames = 0
-                    for future in as_completed(future_to_batch):
-                        try:
-                            batch_frames = future.result()
-                            frames.update(batch_frames)
-                            completed_frames += len(batch_frames)
-                            
-                            if completed_frames % 20 == 0:
-                                logger.info(f"Extracted {completed_frames}/{len(timestamps)} frames")
-                        except Exception as e:
-                            logger.error(f"Batch processing error: {e}")
-                
-                successful_frames = len([f for f in frames.values() if f is not None])
-                logger.info(f"Parallel frame extraction completed: {successful_frames}/{len(timestamps)} successful")
+            # Use single-pass extraction (much faster!)
+            frames = self._extract_all_frames_single_pass(temp_video, timestamps, width, height)
             
-            # Extract audio in parallel with frame processing cleanup
+            # Extract audio in parallel
             logger.info("Extracting audio")
             audio_path = os.path.join(self.temp_dir, 'extracted_audio.wav')
 
-            # Use more efficient audio extraction settings
             stream = ffmpeg.input(temp_video)
             stream = ffmpeg.output(stream, audio_path,
                                  acodec='pcm_s16le',
                                  ar='16000',
                                  ac='1',
-                                 preset='ultrafast')  # Faster encoding
+                                 preset='ultrafast')
 
             ffmpeg.run(stream, overwrite_output=True, quiet=True)
             logger.info(f"Audio extracted to: {audio_path}")
@@ -255,6 +368,9 @@ class VideoExtractor:
             # Clean up video file
             if os.path.exists(temp_video):
                 os.unlink(temp_video)
+            
+            successful_frames = len([f for f in frames.values() if f is not None])
+            logger.info(f"Processing completed: {successful_frames}/{len(timestamps)} frames extracted")
             
             return {
                 'frames': frames,
