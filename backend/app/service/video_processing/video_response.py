@@ -1,6 +1,8 @@
 import os
+import logging
 from datetime import datetime
 
+logger = logging.getLogger(__name__)
 MIN_OFF_PERIOD_DURATION = int(os.getenv("MIN_OFF_PERIOD_DURATION", "6"))  # Minimum seconds for significant off period
 
 
@@ -23,8 +25,23 @@ class VideoResponse:
             person_stats = camera_analysis['detailed_results']['person_stats']
             
             for person_id, stats in person_stats.items():
-                periods = self._group_consecutive_periods(person_timelines.get(person_id, []))
-                participants[f"person_{person_id}"] = self._format_participant_data(person_id, stats, periods)
+                # person_id already comes as "person_1", "person_2", etc. from video_processing
+                person_timeline = person_timelines.get(person_id, [])
+                
+                # DEBUG: Log individual person timeline data
+                if person_timeline:
+                    on_timestamps = [event['timestamp'] for event in person_timeline if event['camera_on']]
+                    logger.info(f"PERSON TIMELINE DEBUG - {person_id}: {len(on_timestamps)} ON timestamps out of {len(person_timeline)} total")
+                    if len(on_timestamps) > 0:
+                        logger.info(f"  First ON: {on_timestamps[0]:.1f}s, Last ON: {on_timestamps[-1]:.1f}s")
+                        # Show a sample of ON timestamps for verification
+                        sample_on = on_timestamps[:5] + ['...'] + on_timestamps[-5:] if len(on_timestamps) > 10 else on_timestamps
+                        logger.info(f"  Sample ON timestamps: {sample_on}")
+                else:
+                    logger.warning(f"PERSON TIMELINE DEBUG - {person_id}: No timeline data found!")
+                
+                periods = self._group_consecutive_periods(person_timeline)
+                participants[person_id] = self._format_participant_data(person_id, stats, periods)
 
             # Generate recommendations
             recommendations = self._generate_recommendations(participants, attire_analysis)
@@ -61,7 +78,13 @@ class VideoResponse:
             'technical_info': {
                 'analysis_method': 'YOLO + Gemini',
                 'total_frames_analyzed': camera_analysis['summary']['total_samples_analyzed'],
-                'analysis_timestamp': datetime.now().isoformat()
+                'analysis_timestamp': datetime.now().isoformat(),
+                # Add missing technical details from video_processing
+                'camera_availability': camera_analysis['detailed_results'].get('camera_availability', 0),
+                'face_detection_rate': camera_analysis['detailed_results'].get('face_detection_rate', 0),
+                'total_off_duration': camera_analysis['detailed_results'].get('total_off_duration', 0),
+                'static_image_alerts_count': len(camera_analysis['detailed_results'].get('static_image_alerts', [])),
+                'off_periods_count': len(camera_analysis['detailed_results'].get('off_periods', []))
             }
         }
 
@@ -146,12 +169,17 @@ class VideoResponse:
 
         return {
             'participant_id': person_id,
+            'participant_name': stats.get('person_name', person_id),  # Use person_name from video_processing
+            'face_image': stats.get('face_image'),  # Add face image for UI display
             'engagement_summary': {
                 'overall_status': engagement_status,
                 'camera_on_percentage': round(stats['camera_on_percentage'], 1),
                 'active_camera_percentage': round(stats['camera_active_percentage'], 1),
                 'using_static_image': stats.get('using_static_image', False),
-                'static_image_percentage': round(stats.get('camera_static_percentage', 0), 1)
+                'static_image_percentage': round(stats.get('camera_static_percentage', 0), 1),
+                'total_samples': stats.get('total_samples', 0),  # Add total samples
+                'samples_with_faces': stats.get('samples_with_faces', 0),  # Add face detection count
+                'samples_with_active_camera': stats.get('samples_with_active_camera', 0)  # Add active camera count
             },
             'session_periods': {
                 'camera_on_periods': [
@@ -186,7 +214,8 @@ class VideoResponse:
             'behavior_insights': {
                 'consistency_score': consistency_score,
                 'engagement_pattern': pattern,
-                'notable_issues': issues
+                'notable_issues': issues,
+                'camera_on_overall': stats.get('camera_on_overall', False)  # Add overall camera status
             }
         }
 
@@ -219,6 +248,8 @@ class VideoResponse:
 
     def _create_session_patterns(self, overall_periods, camera_analysis):
         """Create session-wide pattern data"""
+        detailed_results = camera_analysis['detailed_results']
+        
         return {
             'engagement_timeline': [
                 {
@@ -232,7 +263,14 @@ class VideoResponse:
                     'start': p['start_formatted'],
                     'end': p['end_formatted'],
                     'duration_formatted': self._format_duration(p['duration'])
-                } for p in camera_analysis['detailed_results']['off_periods']
+                } for p in detailed_results['off_periods']
+            ],
+            # Add missing static image alerts
+            'static_image_alerts': [
+                {
+                    'timestamp': alert['timestamp'],
+                    'is_real': alert['is_real']
+                } for alert in detailed_results.get('static_image_alerts', [])
             ]
         }
 
@@ -303,13 +341,13 @@ class VideoResponse:
             
             # Validate detailed_results structure
             detailed_results = camera_analysis['detailed_results']
-            required_detailed_keys = ['person_timelines', 'person_stats', 'camera_timeline', 'off_periods']
+            required_detailed_keys = ['person_timelines', 'person_stats', 'camera_timeline', 'off_periods', 'static_image_alerts']
             if not all(key in detailed_results for key in required_detailed_keys):
                 return False
             
             # Validate summary structure
             summary = camera_analysis['summary']
-            required_summary_keys = ['camera_on_percentage', 'total_samples_analyzed']
+            required_summary_keys = ['camera_on_percentage', 'total_samples_analyzed', 'total_samples']
             if not all(key in summary for key in required_summary_keys):
                 return False
             

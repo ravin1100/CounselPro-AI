@@ -273,6 +273,9 @@ class VideoProcessor:
                 current_persons = set()  # Track active persons in this frame
 
                 try:
+                    # Create a copy of frame for debugging visualization
+                    debug_frame = frame.copy()
+                    
                     # OPTIMIZED: Use DeepFace.extract_faces() for faster face detection only
                     face_objs = DeepFace.extract_faces(
                         img_path=frame,
@@ -285,6 +288,11 @@ class VideoProcessor:
                         for i, face_obj in enumerate(face_objs):
                             # Check if face is real (anti-spoofing)
                             is_real = face_obj.get("is_real", True)
+                            
+                            # Add debug text to frame
+                            cv2.putText(debug_frame, f"Face {i+1}: {'REAL' if is_real else 'SPOOFED'}", 
+                                      (10, 30 + i*30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, 
+                                      (0, 255, 0) if is_real else (0, 0, 255), 2)
                             
                             if is_real:
                                 # Get face image from face_obj
@@ -323,6 +331,24 @@ class VideoProcessor:
                                     "is_real": is_real
                                 })
                                 logger.info(f"Static/spoofed face detected at timestamp {self._format_timestamp(timestamp)}")
+                    
+                    # Show debug window with frame and detection results
+                    cv2.putText(debug_frame, f"Time: {self._format_timestamp(timestamp)}", 
+                              (10, debug_frame.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                    cv2.putText(debug_frame, f"Total faces: {len(face_objs) if face_objs else 0}", 
+                              (10, debug_frame.shape[0] - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                    
+                    # Resize for display (make it smaller for convenience)
+                    display_frame = cv2.resize(debug_frame, (640, 480))
+                    cv2.imshow('Face Detection Debug', display_frame)
+                    
+                    # Wait for key press (1ms timeout to not block processing)
+                    key = cv2.waitKey(500) & 0xFF
+                    if key == ord('q'):  # Press 'q' to quit
+                        cv2.destroyAllWindows()
+                        raise KeyboardInterrupt("User requested stop")
+                    elif key == ord('s'):  # Press 's' to skip/pause
+                        cv2.waitKey(0)  # Wait indefinitely until next key press
                                 
                 except Exception as e:
                     logger.error(f"Face detection error: {e}")
@@ -427,6 +453,9 @@ class VideoProcessor:
                 "face_detection_rate": round(face_detected_count / total_samples * 100, 1)
             }
 
+            # Cleanup CV windows
+            cv2.destroyAllWindows()
+
             return {
                 "success": True,
                 "detailed_results": detailed_results,
@@ -436,6 +465,8 @@ class VideoProcessor:
 
         except Exception as e:
             logger.error(f"Camera status analysis failed: {e}", exc_info=True)
+            # Cleanup CV windows on error too
+            cv2.destroyAllWindows()
             return {
                 "success": False,
                 "detailed_results": None,
